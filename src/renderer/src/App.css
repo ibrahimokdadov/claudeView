@@ -1,0 +1,921 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* ── Base theme ──────────────────────────────────── */
+  --bg: rgba(14, 16, 20, 0.94);
+  --bg-card: rgba(255, 255, 255, 0.035);
+  --bg-card-hover: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.07);
+  --border-glow: rgba(74, 222, 128, 0.12);
+  --text-primary: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.5);
+  --text-muted: rgba(255, 255, 255, 0.25);
+  --accent: #7c6cf2;
+  --radius: 14px;
+  --radius-sm: 10px;
+
+  /* ── Plant palette ──────────────────────────────── */
+  --plant-green: #4ade80;
+  --plant-dark-green: #22c55e;
+  --plant-blue: #60a5fa;
+  --plant-yellow: #fbbf24;
+  --plant-gray: #6b7280;
+  --plant-brown: #92400e;
+  --plant-pot: #c2956a;
+  --plant-pot-dark: #a87d52;
+  --plant-pot-highlight: #d4a574;
+  --plant-bloom: #f472b6;
+  --plant-bloom-gold: #fbbf24;
+  --plant-error: #ef4444;
+  --plant-wilt: #9ca3af;
+
+  /* ── State-driven plant colors ──────────────────── */
+  --plant-primary: var(--plant-green);
+  --plant-accent: var(--plant-dark-green);
+
+  /* ── Shelf ──────────────────────────────────────── */
+  --shelf-color: rgba(139, 90, 43, 0.18);
+  --shelf-edge: rgba(139, 90, 43, 0.3);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ═══════════════════════════════════════════════════════
+   GARDEN VIEW (Floating Widget)
+   ═══════════════════════════════════════════════════════ */
+
+.garden {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+  backdrop-filter: blur(28px) saturate(1.5);
+  -webkit-backdrop-filter: blur(28px) saturate(1.5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* ── Garden Header ─────────────────────────────────── */
+
+.garden-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 9px;
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.garden-header-drag {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.garden-header-leaf {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.garden-header-title {
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+}
+
+.garden-header-badge {
+  background: rgba(74, 222, 128, 0.15);
+  color: var(--plant-green);
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 1px 6px;
+  line-height: 16px;
+}
+
+.garden-header-actions {
+  display: flex;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.btn-icon {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.btn-icon:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-secondary);
+}
+
+.btn-close:hover {
+  background: rgba(255, 80, 80, 0.15);
+  color: #ff6b6b;
+}
+
+/* ── Garden Shelf ──────────────────────────────────── */
+
+.garden-shelf {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.garden-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 4px;
+  padding: 16px 10px 0;
+  min-height: 110px;
+}
+
+.garden-shelf-surface {
+  height: 6px;
+  background: linear-gradient(180deg, var(--shelf-edge), var(--shelf-color));
+  border-radius: 0 0 3px 3px;
+  margin: 0 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* ── Plant Pot Wrapper ─────────────────────────────── */
+
+.plant-pot-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 4px 6px 2px;
+  border-radius: var(--radius-sm);
+  transition: background 0.2s, transform 0.2s;
+  position: relative;
+  color: inherit;
+  font: inherit;
+  min-width: 56px;
+}
+
+.plant-pot-wrapper:hover {
+  background: rgba(255, 255, 255, 0.04);
+  transform: translateY(-2px);
+}
+
+.plant-pot-wrapper--selected {
+  background: rgba(74, 222, 128, 0.06);
+  box-shadow: 0 0 0 1px var(--border-glow);
+}
+
+.plant-pot-wrapper--selected:hover {
+  background: rgba(74, 222, 128, 0.08);
+}
+
+.plant-pot-plant {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  min-height: 60px;
+}
+
+/* Waiting attention indicator — pulsing blue dot above the plant */
+.plant-pot-attention {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.plant-pot-attention-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--plant-blue);
+  box-shadow: 0 0 6px var(--plant-blue), 0 0 12px rgba(96, 165, 250, 0.3);
+  animation: attention-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes attention-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 6px var(--plant-blue), 0 0 12px rgba(96, 165, 250, 0.3);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.4);
+    box-shadow: 0 0 10px var(--plant-blue), 0 0 20px rgba(96, 165, 250, 0.4);
+  }
+}
+
+.plant-pot-name {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  max-width: 58px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  margin-top: 2px;
+  line-height: 1.2;
+}
+
+.plant-pot-progress {
+  position: absolute;
+  top: 2px;
+  right: 0;
+}
+
+/* ── Detail Card ───────────────────────────────────── */
+
+.detail-card {
+  margin: 8px 10px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  animation: detail-slide-in 0.25s ease-out;
+}
+
+@keyframes detail-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.detail-card--working { border-color: rgba(74, 222, 128, 0.15); }
+.detail-card--waiting { border-color: rgba(96, 165, 250, 0.15); }
+.detail-card--idle    { border-color: rgba(107, 114, 128, 0.12); }
+.detail-card--done    { border-color: rgba(244, 114, 182, 0.15); }
+.detail-card--error   { border-color: rgba(239, 68, 68, 0.15); }
+
+.detail-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.detail-card-project {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.detail-card-name {
+  font-weight: 650;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-card-path {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+.detail-card-status {
+  font-size: 9px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.detail-card-status--working { background: rgba(74, 222, 128, 0.12); color: var(--plant-green); }
+.detail-card-status--waiting { background: rgba(96, 165, 250, 0.12); color: var(--plant-blue); }
+.detail-card-status--idle    { background: rgba(107, 114, 128, 0.12); color: var(--plant-gray); }
+.detail-card-status--done    { background: rgba(244, 114, 182, 0.12); color: var(--plant-bloom); }
+.detail-card-status--error   { background: rgba(239, 68, 68, 0.12); color: var(--plant-error); }
+
+.detail-card-time {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Current action */
+.detail-card-action {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 6px;
+  padding: 4px 6px;
+  background: rgba(255, 255, 255, 0.025);
+  border-radius: 5px;
+}
+
+.detail-card-tool-icon {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.detail-card-action-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-card-file {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* Current task */
+.detail-card-task {
+  margin-bottom: 8px;
+}
+
+.detail-card-task-text {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Progress bar */
+.detail-card-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.detail-card-progress-track {
+  flex: 1;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.detail-card-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--plant-green), var(--plant-bloom));
+  border-radius: 2px;
+  transition: width 0.5s ease;
+  min-width: 3px;
+}
+
+.detail-card-progress-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Task list */
+.detail-card-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 6px;
+}
+
+.detail-card-task-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.detail-card-task-check {
+  font-size: 10px;
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.detail-card-task-item--completed .detail-card-task-check {
+  color: var(--plant-green);
+}
+
+.detail-card-task-item--in_progress .detail-card-task-check {
+  color: var(--plant-blue);
+  animation: spin-dot 1.5s linear infinite;
+}
+
+.detail-card-task-item--pending .detail-card-task-check {
+  color: var(--text-muted);
+}
+
+@keyframes spin-dot {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.detail-card-task-label {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-card-task-item--completed .detail-card-task-label {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.detail-card-task-more {
+  font-size: 10px;
+  color: var(--text-muted);
+  padding-left: 19px;
+}
+
+/* Footer */
+.detail-card-footer {
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.detail-card-duration {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* ── Empty Garden ──────────────────────────────────── */
+
+.empty-garden {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 20px;
+}
+
+.empty-garden-svg {
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+
+.empty-garden-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.empty-garden-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ═══════════════════════════════════════════════════════
+   GREENHOUSE VIEW (Full Dashboard)
+   ═══════════════════════════════════════════════════════ */
+
+.greenhouse {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #0e1014;
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.greenhouse-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 28px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.greenhouse-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.greenhouse-header-leaf {
+  opacity: 0.8;
+  flex-shrink: 0;
+}
+
+.greenhouse-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.greenhouse-count {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.greenhouse-journal-section {
+  margin-top: 8px;
+}
+
+.greenhouse-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+
+.greenhouse-body::-webkit-scrollbar {
+  width: 5px;
+}
+
+.greenhouse-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.greenhouse-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+.greenhouse-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+/* ── Greenhouse Plant Card ─────────────────────────── */
+
+.greenhouse-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  transition: background 0.2s, border-color 0.2s;
+  cursor: default;
+}
+
+.greenhouse-card:hover {
+  background: var(--bg-card-hover);
+}
+
+.greenhouse-card--working { border-color: rgba(74, 222, 128, 0.12); }
+.greenhouse-card--waiting { border-color: rgba(96, 165, 250, 0.12); }
+.greenhouse-card--done    { border-color: rgba(244, 114, 182, 0.12); }
+.greenhouse-card--error   { border-color: rgba(239, 68, 68, 0.12); }
+
+.greenhouse-card-plant {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.greenhouse-card-plant-svg {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.greenhouse-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.greenhouse-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.greenhouse-card-name {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.greenhouse-badge {
+  font-size: 9px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
+.greenhouse-badge--working { background: rgba(74, 222, 128, 0.12); color: var(--plant-green); }
+.greenhouse-badge--waiting { background: rgba(96, 165, 250, 0.12); color: var(--plant-blue); }
+.greenhouse-badge--idle    { background: rgba(107, 114, 128, 0.12); color: var(--plant-gray); }
+.greenhouse-badge--done    { background: rgba(244, 114, 182, 0.12); color: var(--plant-bloom); }
+.greenhouse-badge--error   { background: rgba(239, 68, 68, 0.12); color: var(--plant-error); }
+
+.greenhouse-card-action {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 4px 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 5px;
+}
+
+.greenhouse-card-tool-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.greenhouse-card-file {
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.greenhouse-card-task {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.greenhouse-card-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.greenhouse-card-progress-track {
+  flex: 1;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.greenhouse-card-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--plant-green), var(--plant-bloom));
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+
+.greenhouse-card-progress-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.greenhouse-card-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.greenhouse-card-task-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.greenhouse-card-task-icon {
+  font-size: 10px;
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.greenhouse-card-task-item--completed .greenhouse-card-task-icon { color: var(--plant-green); }
+.greenhouse-card-task-item--in_progress .greenhouse-card-task-icon { color: var(--plant-blue); }
+.greenhouse-card-task-item--pending .greenhouse-card-task-icon { color: var(--text-muted); }
+
+.greenhouse-card-task-text {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.greenhouse-card-task-item--completed .greenhouse-card-task-text {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.greenhouse-card-footer {
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.greenhouse-card-duration {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* ── Garden Journal ────────────────────────────────── */
+
+.journal {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.journal-header {
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.journal-header-icon {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+
+.journal-header-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.journal-log {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.journal-log::-webkit-scrollbar {
+  width: 4px;
+}
+
+.journal-log::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+}
+
+.journal-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 14px;
+  font-family: 'Cascadia Code', 'Consolas', 'Menlo', monospace;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.journal-entry-time {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  min-width: 42px;
+}
+
+.journal-entry-project {
+  color: var(--plant-green);
+  font-weight: 600;
+  flex-shrink: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.journal-entry-status {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.journal-entry-status--working { background: rgba(74, 222, 128, 0.1); color: var(--plant-green); }
+.journal-entry-status--waiting { background: rgba(96, 165, 250, 0.1); color: var(--plant-blue); }
+.journal-entry-status--idle    { background: rgba(107, 114, 128, 0.1); color: var(--plant-gray); }
+.journal-entry-status--done    { background: rgba(244, 114, 182, 0.1); color: var(--plant-bloom); }
+.journal-entry-status--error   { background: rgba(239, 68, 68, 0.1); color: var(--plant-error); }
+
+.journal-entry-separator {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.journal-entry-activity {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.journal-empty {
+  padding: 16px 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ── Greenhouse empty state ────────────────────────── */
+
+.greenhouse-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 60px 20px;
+}
+
+.greenhouse-empty-svg {
+  opacity: 0.7;
+  margin-bottom: 8px;
+}
+
+.greenhouse-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.greenhouse-empty-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ═══════════════════════════════════════════════════════
+   SCROLLBAR (shared)
+   ═══════════════════════════════════════════════════════ */
+
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+}
