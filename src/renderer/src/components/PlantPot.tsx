@@ -43,6 +43,9 @@ export function PlantPot({ session, isSelected, onClick }: PlantPotProps): React
       <Pot size="sm" label={projectName} />
 
       <span className="plant-pot-name">{projectName}</span>
+      <span className={`plant-pot-status plant-pot-status--${status}`}>
+        {status === 'working' ? '● working' : status === 'waiting' ? '◉ needs you' : status === 'idle' ? '○ idle' : status === 'done' ? '✓ done' : '✗ error'}
+      </span>
 
       {/* Tiny progress ring */}
       {totalTodos > 0 && (
