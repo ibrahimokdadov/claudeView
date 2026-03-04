@@ -1,11 +1,20 @@
 import { app, shell, BrowserWindow, ipcMain, screen } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { execSync } from 'child_process'
 import chokidar from 'chokidar'
 import * as path from 'path'
 import * as os from 'os'
-import { readSessions } from './sessionReader'
-import { IPC_CHANNELS } from '../shared/types'
+import {
+  getSessions,
+  initRegistry,
+  handleTranscriptChange,
+  handleHistoryChange,
+  handleTodosChange,
+  handleTasksChange,
+  updateProcessDetection,
+} from './sessionReader'
+import { IPC_CHANNELS, type SessionInfo } from '../shared/types'
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude')
 const HISTORY_FILE = path.join(CLAUDE_DIR, 'history.jsonl')
@@ -17,10 +26,13 @@ let mainWindow: BrowserWindow | null = null
 let greenhouseWindow: BrowserWindow | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let pollInterval: ReturnType<typeof setInterval> | null = null
+let processInterval: ReturnType<typeof setInterval> | null = null
+let lastSessions: SessionInfo[] = []
 
 function sendSessions(): void {
   try {
-    const sessions = readSessions()
+    const sessions = getSessions()
+    lastSessions = sessions
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(IPC_CHANNELS.SESSIONS_UPDATE, sessions)
     }
@@ -32,12 +44,50 @@ function sendSessions(): void {
   }
 }
 
+// ── Focus terminal window ────────────────────────────────────────────────
+// Walk up the process tree from parentPid (2-3 levels) looking for a window
+// with a visible main window handle, then bring it to the foreground.
+
+function focusTerminalWindow(parentPid: number): void {
+  try {
+    const ps = `
+$id = ${parentPid}
+for ($i = 0; $i -lt 4; $i++) {
+  $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+  if ($p -and $p.MainWindowHandle -ne [IntPtr]::Zero) {
+    Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public class WinFocus {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+'@
+    [WinFocus]::ShowWindow($p.MainWindowHandle, 9)
+    [WinFocus]::SetForegroundWindow($p.MainWindowHandle)
+    break
+  }
+  $wmi = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+  if (-not $wmi) { break }
+  $id = $wmi.ParentProcessId
+}`
+    // Pipe script via stdin to avoid shell escaping issues
+    execSync('powershell -NoProfile -Command -', {
+      input: ps,
+      timeout: 5000,
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+  } catch {
+    // Best-effort: if PowerShell fails, silently ignore
+  }
+}
+
 function scheduleSend(): void {
   if (debounceTimer) clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => {
     sendSessions()
     debounceTimer = null
-  }, 300)
+  }, 100)
 }
 
 function createWindow(): void {
@@ -121,23 +171,51 @@ function createGreenhouseWindow(): void {
 }
 
 function startWatcher(): void {
+  initRegistry()
+
   const watchPaths = [HISTORY_FILE, TODOS_DIR, TASKS_DIR, PROJECTS_DIR]
 
   const watcher = chokidar.watch(watchPaths, {
     persistent: true,
     ignoreInitial: true,
-    awaitWriteFinish: {
-      stabilityThreshold: 200,
-      pollInterval: 100,
-    },
   })
 
-  watcher.on('change', scheduleSend)
-  watcher.on('add', scheduleSend)
+  watcher.on('change', (filePath) => {
+    const norm = filePath.replace(/\\/g, '/')
+    if (norm.includes('/projects/') && norm.endsWith('.jsonl')) {
+      handleTranscriptChange(filePath)
+    } else if (norm.endsWith('history.jsonl')) {
+      handleHistoryChange()
+    } else if (norm.includes('/todos/')) {
+      handleTodosChange(filePath)
+    } else if (norm.includes('/tasks/')) {
+      handleTasksChange(filePath)
+    }
+    scheduleSend()
+  })
+
+  watcher.on('add', (filePath) => {
+    const norm = filePath.replace(/\\/g, '/')
+    if (norm.includes('/projects/') && norm.endsWith('.jsonl')) {
+      handleTranscriptChange(filePath)
+    } else if (norm.includes('/todos/')) {
+      handleTodosChange(filePath)
+    } else if (norm.includes('/tasks/')) {
+      handleTasksChange(filePath)
+    }
+    scheduleSend()
+  })
+
   watcher.on('unlink', scheduleSend)
 
-  // 3-second polling fallback
-  pollInterval = setInterval(sendSessions, 3000)
+  // Safety-net poll (file events handle real-time; this catches edge cases)
+  pollInterval = setInterval(sendSessions, 5000)
+
+  // Process detection every 5s
+  processInterval = setInterval(() => {
+    updateProcessDetection()
+    scheduleSend()
+  }, 5000)
 }
 
 app.whenReady().then(() => {
@@ -163,6 +241,13 @@ app.whenReady().then(() => {
     greenhouseWindow?.close()
   })
 
+  ipcMain.on(IPC_CHANNELS.FOCUS_SESSION, (_event, sessionId: string) => {
+    const session = lastSessions.find((s) => s.sessionId === sessionId)
+    if (session?.parentPid) {
+      focusTerminalWindow(session.parentPid)
+    }
+  })
+
   createWindow()
   startWatcher()
 
@@ -173,5 +258,6 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (pollInterval) clearInterval(pollInterval)
+  if (processInterval) clearInterval(processInterval)
   if (process.platform !== 'darwin') app.quit()
 })

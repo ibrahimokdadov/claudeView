@@ -67,6 +67,9 @@ export function GreenhouseView({ sessions }: GreenhouseViewProps): React.JSX.Ele
     )
   }
 
+  const active = sessions.filter((s) => !s.archived)
+  const archived = sessions.filter((s) => s.archived)
+
   return (
     <div className="greenhouse">
       <div className="greenhouse-header">
@@ -82,16 +85,29 @@ export function GreenhouseView({ sessions }: GreenhouseViewProps): React.JSX.Ele
             />
           </svg>
           <h1 className="greenhouse-title">The Greenhouse</h1>
-          <span className="greenhouse-count">{sessions.length} {sessions.length === 1 ? 'plant' : 'plants'}</span>
+          <span className="greenhouse-count">{active.length} {active.length === 1 ? 'plant' : 'plants'}</span>
         </div>
       </div>
 
       <div className="greenhouse-body">
         <div className="greenhouse-grid">
-          {sessions.map((session) => (
+          {active.map((session) => (
             <GreenhousePlantCard key={session.sessionId} session={session} />
           ))}
         </div>
+
+        {archived.length > 0 && (
+          <div className="greenhouse-archive-section">
+            <div className="greenhouse-archive-header">
+              <span className="greenhouse-archive-label">Archive — {archived.length} past {archived.length === 1 ? 'session' : 'sessions'}</span>
+            </div>
+            <div className="greenhouse-grid greenhouse-grid--archived">
+              {archived.map((session) => (
+                <GreenhousePlantCard key={session.sessionId} session={session} />
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="greenhouse-journal-section">
           <GardenJournal sessions={sessions} />

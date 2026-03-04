@@ -42,6 +42,9 @@ export interface SessionInfo {
   totalTodos: number
   startedAt: number              // session start time
   hasLock: boolean
+  processPid?: number            // PID of the Claude process itself
+  parentPid?: number             // parent PID (terminal/shell that spawned Claude)
+  archived: boolean              // true when 24h inactive + no live process
 }
 
 export const IPC_CHANNELS = {
@@ -50,4 +53,5 @@ export const IPC_CHANNELS = {
   CLOSE_WINDOW: 'window:close',
   OPEN_GREENHOUSE: 'window:openGreenhouse',
   CLOSE_GREENHOUSE: 'window:closeGreenhouse',
+  FOCUS_SESSION: 'session:focus',
 } as const

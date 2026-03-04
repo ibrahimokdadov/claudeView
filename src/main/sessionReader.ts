@@ -1,26 +1,24 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { execSync } from 'child_process'
+import * as os from 'os'
 import type { SessionInfo, Todo, SessionStatus, PlantType, CurrentAction, TaskEntry } from '../shared/types'
 
-const CLAUDE_DIR = path.join(process.env.USERPROFILE || process.env.HOME || '', '.claude')
+const CLAUDE_DIR = path.join(os.homedir(), '.claude')
 const HISTORY_FILE = path.join(CLAUDE_DIR, 'history.jsonl')
 const TODOS_DIR = path.join(CLAUDE_DIR, 'todos')
 const TASKS_DIR = path.join(CLAUDE_DIR, 'tasks')
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects')
 
-const MAX_AGE_MS = 24 * 60 * 60 * 1000      // 24 hours
-const STALE_THRESHOLD_MS = 4 * 60 * 60 * 1000 // 4 hours — only hide truly old idle sessions
-const MAX_SESSIONS = 6
-const TAIL_BYTES = 128 * 1024               // 128KB tail read for history
-const ACTION_TAIL_BYTES = 4 * 1024          // 4KB tail read for current action
+const MAX_AGE_MS = 24 * 60 * 60 * 1000      // 24 hours — archive threshold
+const TAIL_BYTES = 1024 * 1024               // 1MB tail for history
+const ACTION_TAIL_BYTES = 64 * 1024          // 64KB tail for transcript analysis
 
-// ── Thresholds for mtime-based status ────────────────────────────────────
-const WORKING_MS = 30_000        // < 30s since transcript write = working
-const WAITING_MAX_MS = 10 * 60_000  // 10 min — max time to show "waiting" before assuming closed
-// > 10 min with no transcript writes = idle (session likely closed)
+// Status thresholds
+const WORKING_MS = 30_000           // < 30s transcript age → working
+const RECENT_MS = 5 * 60_000        // < 5min transcript age → use signal for w/w
 
-// ── Types ───────────────────────────────────────────────────────────────
+// ── Types ────────────────────────────────────────────────────────────────
 
 interface HistoryEntry {
   sessionId: string
@@ -32,12 +30,58 @@ interface HistoryEntry {
   message?: { role: string; content: string | { type: string; text: string }[] }
 }
 
-interface TasksDir {
-  hasLock: boolean
+type TranscriptSignal =
+  | 'tool_active'
+  | 'thinking'
+  | 'tool_result_pending'
+  | 'user_message'
+  | 'text_response'
+  | 'user_input_requested'
+  | 'error'
+  | 'unknown'
+
+interface RegistryEntry {
+  sessionId: string
+  project: string
+  display: string
+  firstSeen: number
+  lastTranscriptMtime: number
+  lastTranscriptSignal: TranscriptSignal
+  transcriptPath: string | null
+  processAlive: boolean
+  pid?: number
+  parentPid?: number
   tasks: TaskEntry[]
+  todos: Todo[]
+  currentAction: CurrentAction
+  hasLock: boolean
+  lastActivity: number
 }
 
-// ── File helpers ─────────────────────────────────────────────────────────
+// ── In-Memory Registry ────────────────────────────────────────────────────
+
+const sessionRegistry = new Map<string, RegistryEntry>()
+let registryInitialized = false
+
+function createEmptyEntry(sessionId: string, project: string, firstSeen: number): RegistryEntry {
+  return {
+    sessionId,
+    project,
+    display: '',
+    firstSeen,
+    lastTranscriptMtime: 0,
+    lastTranscriptSignal: 'unknown',
+    transcriptPath: null,
+    processAlive: false,
+    tasks: [],
+    todos: [],
+    currentAction: { tool: null, file: null, summary: null },
+    hasLock: false,
+    lastActivity: firstSeen,
+  }
+}
+
+// ── File helpers ──────────────────────────────────────────────────────────
 
 function tailReadFile(filePath: string, bytes = TAIL_BYTES): string {
   try {
@@ -56,309 +100,17 @@ function fileMtimeMs(filePath: string): number | null {
   try { return fs.statSync(filePath).mtimeMs } catch { return null }
 }
 
-// ── Process detection ────────────────────────────────────────────────────
+// ── Path helpers ──────────────────────────────────────────────────────────
 
-let _cachedLiveSessions: Set<string> | null = null
-let _cacheTime = 0
-const PROCESS_CACHE_MS = 5_000 // cache for 5s to avoid spamming wmic
-
-function getLiveSessionIds(): Set<string> {
-  const now = Date.now()
-  if (_cachedLiveSessions && now - _cacheTime < PROCESS_CACHE_MS) return _cachedLiveSessions
-
-  const ids = new Set<string>()
-  try {
-    // wmic outputs UTF-16 — read as buffer and strip null bytes to get ASCII
-    const buf = execSync(
-      'wmic process where "name=\'node.exe\'" get CommandLine /FORMAT:LIST',
-      { timeout: 5000, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }
-    )
-    const raw = buf.toString('utf8').replace(/\0/g, '')
-    for (const line of raw.split('\n')) {
-      if (!line.includes('claude-code')) continue
-      const match = line.match(/--resume\s+([0-9a-f-]{36})/)
-      if (match) {
-        ids.add(match[1])
-      } else {
-        ids.add('__no_resume__')
-      }
-    }
-  } catch { /* wmic failed — fall back to showing all */ }
-
-  _cachedLiveSessions = ids
-  _cacheTime = now
-  return ids
+function decodeProjectDir(dirName: string): string {
+  return dirName.replace(/^([A-Z])--/, '$1:\\').replace(/-/g, '\\')
 }
 
-// ── Transcript helpers ───────────────────────────────────────────────────
-
-function encodeProjectPath(projectPath: string): string {
-  return projectPath.replace(/[:\\\/]/g, '-')
+function getProjectName(projectPath: string): string {
+  if (!projectPath) return 'Unknown Project'
+  const parts = projectPath.replace(/\\/g, '/').split('/').filter(Boolean)
+  return parts[parts.length - 1] || 'Unknown Project'
 }
-
-function getTranscriptPath(sessionId: string, projectPath: string): string | null {
-  if (!projectPath) return null
-  const encoded = encodeProjectPath(projectPath)
-  const p = path.join(PROJECTS_DIR, encoded, `${sessionId}.jsonl`)
-  try { fs.statSync(p); return p } catch { return null }
-}
-
-function getTranscriptMtime(sessionId: string, projectPath: string): number {
-  const p = getTranscriptPath(sessionId, projectPath)
-  if (!p) return 0
-  return fileMtimeMs(p) || 0
-}
-
-// Tools that prompt the user for input — these mean "waiting", not "working"
-const USER_INPUT_TOOLS = new Set(['AskUserQuestion', 'ask_user_question'])
-
-// Max time to trust AskUserQuestion as "waiting" before assuming closed (1 hour)
-const ASK_USER_MAX_MS = 60 * 60_000
-
-// Check if last transcript entry is specifically an AskUserQuestion (user prompt pending)
-function isBlockedOnUserInput(sessionId: string, projectPath: string): boolean {
-  const p = getTranscriptPath(sessionId, projectPath)
-  if (!p) return false
-
-  const raw = tailReadFile(p, ACTION_TAIL_BYTES)
-  if (!raw) return false
-
-  const lines = raw.split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const trimmed = lines[i].trim()
-    if (!trimmed) continue
-    try {
-      const entry = JSON.parse(trimmed)
-      if (entry.type !== 'assistant' && entry.type !== 'user') continue
-      if (entry.type === 'assistant') {
-        const content = entry.message?.content
-        if (!Array.isArray(content)) return false
-        const toolUses = content.filter((b: { type: string }) => b.type === 'tool_use')
-        return toolUses.length > 0 && toolUses.every(
-          (b: { type: string; name?: string }) => USER_INPUT_TOOLS.has(b.name || '')
-        )
-      }
-      return false // user entry = not blocked on input
-    } catch { /* skip */ }
-  }
-  return false
-}
-
-// Check last transcript entry to determine if Claude is waiting for user
-function isLastEntryAssistantText(sessionId: string, projectPath: string): boolean {
-  const p = getTranscriptPath(sessionId, projectPath)
-  if (!p) return false
-
-  const raw = tailReadFile(p, ACTION_TAIL_BYTES)
-  if (!raw) return false
-
-  const lines = raw.split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const trimmed = lines[i].trim()
-    if (!trimmed) continue
-    try {
-      const entry = JSON.parse(trimmed)
-      // Skip non-conversational entry types (progress, system, result, etc.)
-      if (entry.type !== 'assistant' && entry.type !== 'user') continue
-      if (entry.type === 'assistant') {
-        const content = entry.message?.content
-        if (!Array.isArray(content)) return true // pure text — Claude finished
-
-        const toolUses = content.filter((b: { type: string }) => b.type === 'tool_use')
-        // No tool uses = pure text response
-        if (toolUses.length === 0) return true
-        // All tool uses are user-input tools (AskUserQuestion) = waiting for user
-        if (toolUses.every((b: { type: string; name?: string }) => USER_INPUT_TOOLS.has(b.name || ''))) return true
-        return false  // active tool_use = still working
-      }
-      if (entry.type === 'user') return false // user message pending
-    } catch { /* skip */ }
-  }
-  return false
-}
-
-// Check if last transcript entry has an error
-// Note: system entries with subtype "api_error" are retryable and NOT real errors
-function hasTranscriptError(sessionId: string, projectPath: string): boolean {
-  const p = getTranscriptPath(sessionId, projectPath)
-  if (!p) return false
-
-  const raw = tailReadFile(p, ACTION_TAIL_BYTES)
-  if (!raw) return false
-
-  const lines = raw.split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const trimmed = lines[i].trim()
-    if (!trimmed) continue
-    try {
-      const entry = JSON.parse(trimmed)
-      // Skip non-conversational types (progress, system, file-history-snapshot)
-      // system api_error entries have an `error` field but are retryable — skip them
-      if (entry.type !== 'assistant' && entry.type !== 'user') continue
-      // Only flag error on actual conversational entries
-      if (entry.error) return true
-      return false
-    } catch { /* skip */ }
-  }
-  return false
-}
-
-// ── Current action parser ────────────────────────────────────────────────
-
-function parseCurrentAction(sessionId: string, projectPath: string): CurrentAction {
-  const empty: CurrentAction = { tool: null, file: null, summary: null }
-  const p = getTranscriptPath(sessionId, projectPath)
-  if (!p) return empty
-
-  const raw = tailReadFile(p, ACTION_TAIL_BYTES)
-  if (!raw) return empty
-
-  const lines = raw.split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const trimmed = lines[i].trim()
-    if (!trimmed) continue
-    try {
-      const entry = JSON.parse(trimmed)
-      if (entry.type !== 'assistant') continue
-
-      const content = entry.message?.content || entry.data?.message?.message?.content
-      if (!Array.isArray(content)) continue
-
-      // Find last tool_use block
-      for (let j = content.length - 1; j >= 0; j--) {
-        const block = content[j]
-        if (block.type === 'tool_use') {
-          const tool = block.name || null
-          const input = block.input || {}
-          const file = input.file_path || input.path || input.command?.slice(0, 80) || null
-          const summary = tool ? `Using ${tool}${file ? ` on ${path.basename(String(file))}` : ''}` : null
-          return { tool, file: file ? String(file) : null, summary }
-        }
-      }
-    } catch { /* skip */ }
-  }
-  return empty
-}
-
-// ── History parser ───────────────────────────────────────────────────────
-
-function parseHistoryEntries(): Map<string, {
-  projectPath: string
-  lastActivity: number
-  firstActivity: number
-  lastUserMessage: string
-}> {
-  const raw = tailReadFile(HISTORY_FILE)
-  if (!raw) return new Map()
-
-  const firstNewline = raw.indexOf('\n')
-  const safeRaw = firstNewline >= 0 ? raw.slice(firstNewline + 1) : raw
-  const sessionMap = new Map<string, {
-    projectPath: string
-    lastActivity: number
-    firstActivity: number
-    lastUserMessage: string
-  }>()
-
-  for (const line of safeRaw.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    try {
-      const entry: HistoryEntry = JSON.parse(trimmed)
-      if (!entry.sessionId) continue
-
-      const projectPath = entry.project || entry.projectPath || entry.cwd || ''
-      const ts = entry.timestamp
-      const timestamp = typeof ts === 'number'
-        ? ts > 1e12 ? ts : ts * 1000
-        : Date.parse(String(ts))
-      if (!timestamp || isNaN(timestamp)) continue
-
-      const existing = sessionMap.get(entry.sessionId)
-
-      let lastUserMessage = existing?.lastUserMessage || ''
-      if (entry.display) {
-        lastUserMessage = entry.display.slice(0, 120)
-      } else if (entry.message?.role === 'user') {
-        const c = entry.message.content
-        if (typeof c === 'string') lastUserMessage = c.slice(0, 120)
-        else if (Array.isArray(c)) {
-          const t = c.find((b) => b.type === 'text')
-          if (t?.text) lastUserMessage = t.text.slice(0, 120)
-        }
-      }
-
-      if (!existing || timestamp > existing.lastActivity) {
-        sessionMap.set(entry.sessionId, {
-          projectPath: projectPath || existing?.projectPath || '',
-          lastActivity: timestamp,
-          firstActivity: existing?.firstActivity || timestamp,
-          lastUserMessage,
-        })
-      } else {
-        if (timestamp < existing.firstActivity) {
-          existing.firstActivity = timestamp
-        }
-        if (lastUserMessage && !existing.lastUserMessage) {
-          existing.lastUserMessage = lastUserMessage
-        }
-      }
-    } catch { /* skip malformed */ }
-  }
-
-  return sessionMap
-}
-
-// ── Todos parser (.claude/todos/*.json) ─────────────────────────────────
-
-function parseTodos(): Map<string, Todo[]> {
-  const todoMap = new Map<string, Todo[]>()
-  if (!fs.existsSync(TODOS_DIR)) return todoMap
-
-  let files: string[]
-  try { files = fs.readdirSync(TODOS_DIR) } catch { return todoMap }
-
-  for (const file of files) {
-    if (!file.endsWith('.json')) continue
-    const match = file.match(/^(.+?)-agent-[^.]+\.json$/)
-    if (!match) continue
-    const sessionId = match[1]
-    try {
-      const raw = fs.readFileSync(path.join(TODOS_DIR, file), 'utf8')
-      const todos: Todo[] = JSON.parse(raw)
-      if (!Array.isArray(todos) || todos.length === 0) continue
-      const existing = todoMap.get(sessionId) || []
-      todoMap.set(sessionId, [...existing, ...todos])
-    } catch { /* skip */ }
-  }
-
-  return todoMap
-}
-
-// ── Tasks dir reader (.claude/tasks/{sessionId}/) ─────────────────────
-
-function readTasksDir(sessionId: string): TasksDir | null {
-  const dirPath = path.join(TASKS_DIR, sessionId)
-  if (!fs.existsSync(dirPath)) return null
-
-  const hasLock = fs.existsSync(path.join(dirPath, '.lock'))
-
-  let dirFiles: string[]
-  try { dirFiles = fs.readdirSync(dirPath) } catch { return null }
-
-  const tasks: TaskEntry[] = []
-  for (const file of dirFiles) {
-    if (!/^\d+\.json$/.test(file)) continue
-    try {
-      const raw = fs.readFileSync(path.join(dirPath, file), 'utf8')
-      tasks.push(JSON.parse(raw) as TaskEntry)
-    } catch { /* skip */ }
-  }
-
-  return { hasLock, tasks }
-}
-
-// ── Plant type assignment ────────────────────────────────────────────────
 
 function getPlantType(projectPath: string): PlantType {
   const PLANT_TYPES: PlantType[] = ['succulent', 'fern', 'flower', 'smallTree', 'cactus']
@@ -369,63 +121,119 @@ function getPlantType(projectPath: string): PlantType {
   return PLANT_TYPES[Math.abs(hash) % PLANT_TYPES.length]
 }
 
-// ── Status + task helpers ────────────────────────────────────────────────
+// ── Transcript signal reader ──────────────────────────────────────────────
 
-function getProjectName(projectPath: string): string {
-  if (!projectPath) return 'Unknown Project'
-  const parts = projectPath.replace(/\\/g, '/').split('/').filter(Boolean)
-  return parts[parts.length - 1] || 'Unknown Project'
+const USER_INPUT_TOOLS = new Set(['AskUserQuestion', 'ask_user_question'])
+
+function readTranscriptSignalFromPath(filePath: string): TranscriptSignal {
+  const raw = tailReadFile(filePath, ACTION_TAIL_BYTES)
+  if (!raw) return 'unknown'
+
+  const lines = raw.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim()
+    if (!trimmed) continue
+    try {
+      const entry = JSON.parse(trimmed)
+      const role = entry.type === 'user' ? 'user'
+        : entry.message?.role === 'assistant' ? 'assistant'
+        : null
+      if (!role) continue
+      if (entry.error) return 'error'
+
+      if (role === 'user') {
+        const content = entry.message?.content
+        if (Array.isArray(content)) {
+          if (content.some((b: { type: string }) => b.type === 'tool_result')) return 'tool_result_pending'
+        }
+        return 'user_message'
+      }
+
+      if (role === 'assistant') {
+        const content = entry.message?.content
+        if (!Array.isArray(content)) return 'text_response'
+        const blockTypes = new Set(content.map((b: { type: string }) => b.type))
+        if (blockTypes.has('tool_use')) {
+          const toolUses = content.filter((b: { type: string }) => b.type === 'tool_use')
+          if (toolUses.every((b: { type: string; name?: string }) => USER_INPUT_TOOLS.has(b.name || ''))) {
+            return 'user_input_requested'
+          }
+          return 'tool_active'
+        }
+        if (blockTypes.has('thinking')) return 'thinking'
+        if (blockTypes.has('text')) return 'text_response'
+        return 'unknown'
+      }
+    } catch { /* skip malformed */ }
+  }
+  return 'unknown'
 }
 
-function deriveStatus(
-  transcriptMtime: number,
-  lastActivity: number,
-  todos: Todo[],
-  tasksDir: TasksDir | null,
-  sessionId: string,
-  projectPath: string
-): SessionStatus {
+// ── Current action parser ─────────────────────────────────────────────────
+
+function parseCurrentActionFromPath(filePath: string): CurrentAction {
+  const empty: CurrentAction = { tool: null, file: null, summary: null }
+  const raw = tailReadFile(filePath, ACTION_TAIL_BYTES)
+  if (!raw) return empty
+
+  const lines = raw.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim()
+    if (!trimmed) continue
+    try {
+      const entry = JSON.parse(trimmed)
+      if (entry.type === 'assistant' || entry.message?.role === 'assistant') {
+        const content = entry.message?.content || entry.data?.message?.message?.content
+        if (!Array.isArray(content)) continue
+        for (let j = content.length - 1; j >= 0; j--) {
+          const block = content[j]
+          if (block.type === 'tool_use') {
+            const tool = block.name || null
+            const input = block.input || {}
+            const file = input.file_path || input.path || input.command?.slice(0, 80) || null
+            const summary = tool ? `Using ${tool}${file ? ` on ${path.basename(String(file))}` : ''}` : null
+            return { tool, file: file ? String(file) : null, summary }
+          }
+        }
+      }
+    } catch { /* skip */ }
+  }
+  return empty
+}
+
+// ── Status derivation ────────────────────────────────────────────────────
+
+function deriveStatus(entry: RegistryEntry): SessionStatus {
   const now = Date.now()
-  const transcriptAge = transcriptMtime > 0 ? now - transcriptMtime : Infinity
-  const activityAge = now - lastActivity
-  const allTasks = [...(tasksDir?.tasks || []), ...todos]
+  const transcriptAge = entry.lastTranscriptMtime > 0 ? now - entry.lastTranscriptMtime : Infinity
+  const signal = entry.lastTranscriptSignal
+  const allTasks = [...entry.tasks, ...entry.todos]
 
-  // Check for errors first
-  if (hasTranscriptError(sessionId, projectPath)) return 'error'
+  if (signal === 'error') return 'error'
 
-  // Transcript written within 30s = actively working (fresh writes = Claude is doing something)
+  if (entry.processAlive) {
+    if (transcriptAge < WORKING_MS) return 'working'
+    if (signal === 'tool_active' || signal === 'thinking' || signal === 'tool_result_pending' || signal === 'user_message') return 'working'
+    if (signal === 'user_input_requested' || signal === 'text_response') return 'waiting'
+    return 'waiting' // conservative: alive process with no/unknown transcript
+  }
+
+  // No confirmed process
   if (transcriptAge < WORKING_MS) return 'working'
-
-  // ── Transcript is 30s–10min old: session is open, check what Claude is doing ──
-  if (transcriptMtime > 0 && transcriptAge < WAITING_MAX_MS) {
-    // Last transcript entry is assistant text or AskUserQuestion → waiting for user
-    if (isLastEntryAssistantText(sessionId, projectPath)) return 'waiting'
-    // Has a task lock and no assistant text → still processing between writes
-    if (tasksDir?.hasLock) return 'working'
-    // In-progress tasks + recent transcript = likely still working
-    if (todos.some((t) => t.status === 'in_progress')) return 'working'
-    if (tasksDir?.tasks.some((t) => t.status === 'in_progress')) return 'working'
-    // Default: transcript stopped but not clear why — assume waiting
+  if (transcriptAge < RECENT_MS) {
+    if (signal === 'tool_active' || signal === 'thinking' || signal === 'tool_result_pending' || signal === 'user_message') return 'working'
     return 'waiting'
   }
 
-  // ── Transcript is >10min old: session is likely closed ──
-  // Task files persist on disk after close — do NOT trust in_progress status here
-  // Exception: AskUserQuestion means the session is genuinely waiting (up to 1 hour)
-  if (transcriptMtime > 0 && transcriptAge >= WAITING_MAX_MS) {
-    if (transcriptAge < ASK_USER_MAX_MS && isBlockedOnUserInput(sessionId, projectPath)) return 'waiting'
-    if (allTasks.length > 0 && allTasks.every((t) => t.status === 'completed')) return 'done'
-    return 'idle'
-  }
-
-  // ── No transcript at all — use history activity age as fallback ──
-  if (activityAge < WAITING_MAX_MS) return 'waiting'
+  if (allTasks.length > 0 && allTasks.every((t) => t.status === 'completed')) return 'done'
   return 'idle'
 }
 
-function getCurrentTask(todos: Todo[], tasksDir: TasksDir | null, fallback: string): string | null {
-  if (tasksDir) {
-    const t = tasksDir.tasks.find((t) => t.status === 'in_progress')
+// ── Task helpers ──────────────────────────────────────────────────────────
+
+function getCurrentTask(todos: Todo[], tasks: TaskEntry[], fallback: string): string | null {
+  if (tasks.length > 0) {
+    const t = tasks.find((t) => t.status === 'in_progress')
     if (t?.activeForm) return t.activeForm
     if (t?.subject) return t.subject
   }
@@ -434,11 +242,11 @@ function getCurrentTask(todos: Todo[], tasksDir: TasksDir | null, fallback: stri
   return fallback || null
 }
 
-function getProgress(todos: Todo[], tasksDir: TasksDir | null): { completed: number; total: number } {
-  if (tasksDir && tasksDir.tasks.length > 0) {
+function getProgress(todos: Todo[], tasks: TaskEntry[]): { completed: number; total: number } {
+  if (tasks.length > 0) {
     return {
-      total: tasksDir.tasks.length,
-      completed: tasksDir.tasks.filter((t) => t.status === 'completed').length,
+      total: tasks.length,
+      completed: tasks.filter((t) => t.status === 'completed').length,
     }
   }
   return {
@@ -447,67 +255,340 @@ function getProgress(todos: Todo[], tasksDir: TasksDir | null): { completed: num
   }
 }
 
-// ── Main export ──────────────────────────────────────────────────────────
+// ── WMI helpers ───────────────────────────────────────────────────────────
 
-export function readSessions(): SessionInfo[] {
-  const historyMap = parseHistoryEntries()
-  const todoMap = parseTodos()
-  const liveIds = getLiveSessionIds()
-  const hasAnyLive = liveIds.size > 0
+const CLAUDE_CMD_PATTERNS = [
+  /claude-code/i,
+  /@anthropic-ai[/\\]claude/i,
+  /\bclaude\.exe\b/i,
+  /\bclaude\b.*\bcli\.js\b/i,
+]
+const CLAUDE_EXCLUDE_PATTERNS = [
+  /\bmcp\b.*\bserve\b/i,
+  /\bmcp\b.*\bstart\b/i,
+]
+
+function isClaudeProcess(cmdline: string): boolean {
+  if (!CLAUDE_CMD_PATTERNS.some((p) => p.test(cmdline))) return false
+  if (CLAUDE_EXCLUDE_PATTERNS.some((p) => p.test(cmdline))) return false
+  return true
+}
+
+function parseWmicRecord(record: string): Record<string, string> {
+  const fields: Record<string, string> = {}
+  for (const line of record.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    const eqIdx = trimmed.indexOf('=')
+    if (eqIdx > 0) {
+      fields[trimmed.slice(0, eqIdx)] = trimmed.slice(eqIdx + 1)
+    }
+  }
+  return fields
+}
+
+function parseWmiDate(wmiDate: string): number | null {
+  if (!wmiDate) return null
+  const m = wmiDate.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/)
+  if (!m) return null
+  return new Date(
+    parseInt(m[1]),
+    parseInt(m[2]) - 1,
+    parseInt(m[3]),
+    parseInt(m[4]),
+    parseInt(m[5]),
+    parseInt(m[6])
+  ).getTime()
+}
+
+// ── Registry initialization helpers ──────────────────────────────────────
+
+function scanAndRegisterTranscripts(): void {
+  let projectDirs: string[]
+  try { projectDirs = fs.readdirSync(PROJECTS_DIR) } catch { return }
+
+  for (const dirName of projectDirs) {
+    if (dirName === 'subagents') continue
+    const dirPath = path.join(PROJECTS_DIR, dirName)
+    let stat: fs.Stats
+    try { stat = fs.statSync(dirPath) } catch { continue }
+    if (!stat.isDirectory()) continue
+
+    let files: string[]
+    try { files = fs.readdirSync(dirPath) } catch { continue }
+
+    for (const file of files) {
+      if (!file.endsWith('.jsonl')) continue
+      const sessionId = file.slice(0, -6)
+      if (sessionId.startsWith('agent-')) continue
+      handleTranscriptChange(path.join(dirPath, file))
+    }
+  }
+}
+
+function scanAndRegisterTodos(): void {
+  if (!fs.existsSync(TODOS_DIR)) return
+  let files: string[]
+  try { files = fs.readdirSync(TODOS_DIR) } catch { return }
+  for (const file of files) {
+    if (file.endsWith('.json')) handleTodosChange(path.join(TODOS_DIR, file))
+  }
+}
+
+function scanAndRegisterTasks(): void {
+  if (!fs.existsSync(TASKS_DIR)) return
+  let dirs: string[]
+  try { dirs = fs.readdirSync(TASKS_DIR) } catch { return }
+  for (const sessionDir of dirs) {
+    const dirPath = path.join(TASKS_DIR, sessionDir)
+    let files: string[]
+    try { files = fs.readdirSync(dirPath) } catch { continue }
+    const jsonFile = files.find((f) => /^\d+\.json$/.test(f))
+    if (jsonFile) handleTasksChange(path.join(dirPath, jsonFile))
+  }
+}
+
+// ── Event handlers (exported for use in index.ts) ─────────────────────────
+
+export function handleTranscriptChange(filePath: string): void {
+  const fileName = path.basename(filePath, '.jsonl')
+  // Skip agent transcripts and non-UUID filenames
+  if (fileName.startsWith('agent-')) return
+  if (!fileName.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) return
+
+  const dirName = path.basename(path.dirname(filePath))
+  if (dirName === 'subagents') return
+
+  const sessionId = fileName
+  const projectPath = decodeProjectDir(dirName)
+  const mtime = fileMtimeMs(filePath) || Date.now()
+
+  let entry = sessionRegistry.get(sessionId)
+  if (!entry) {
+    entry = createEmptyEntry(sessionId, projectPath, mtime)
+    sessionRegistry.set(sessionId, entry)
+  }
+
+  entry.transcriptPath = filePath
+  entry.lastTranscriptMtime = mtime
+  entry.lastActivity = Math.max(entry.lastActivity, mtime)
+
+  entry.lastTranscriptSignal = readTranscriptSignalFromPath(filePath)
+  entry.currentAction = parseCurrentActionFromPath(filePath)
+}
+
+export function handleHistoryChange(): void {
+  const raw = tailReadFile(HISTORY_FILE)
+  if (!raw) return
+
+  const firstNewline = raw.indexOf('\n')
+  const safeRaw = firstNewline >= 0 ? raw.slice(firstNewline + 1) : raw
+
+  for (const line of safeRaw.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      const histEntry: HistoryEntry = JSON.parse(trimmed)
+      if (!histEntry.sessionId) continue
+
+      const projectPath = histEntry.project || histEntry.projectPath || histEntry.cwd || ''
+      const ts = histEntry.timestamp
+      const timestamp = typeof ts === 'number'
+        ? ts > 1e12 ? ts : ts * 1000
+        : Date.parse(String(ts))
+      if (!timestamp || isNaN(timestamp)) continue
+
+      let entry = sessionRegistry.get(histEntry.sessionId)
+      if (!entry) {
+        entry = createEmptyEntry(histEntry.sessionId, projectPath, timestamp)
+        sessionRegistry.set(histEntry.sessionId, entry)
+      }
+
+      if (timestamp > entry.lastActivity) {
+        entry.lastActivity = timestamp
+        if (projectPath) entry.project = projectPath
+      }
+      if (timestamp < entry.firstSeen) {
+        entry.firstSeen = timestamp
+      }
+
+      // Update display text from history
+      if (histEntry.display && timestamp >= entry.lastActivity) {
+        entry.display = histEntry.display.slice(0, 120)
+      } else if (histEntry.message?.role === 'user') {
+        const c = histEntry.message.content
+        if (typeof c === 'string' && !entry.display) entry.display = c.slice(0, 120)
+        else if (Array.isArray(c) && !entry.display) {
+          const t = c.find((b) => b.type === 'text')
+          if (t?.text) entry.display = t.text.slice(0, 120)
+        }
+      }
+    } catch { /* skip malformed */ }
+  }
+}
+
+export function handleTodosChange(filePath: string): void {
+  const file = path.basename(filePath)
+  if (!file.endsWith('.json')) return
+  const match = file.match(/^(.+?)-agent-[^.]+\.json$/)
+  if (!match) return
+
+  const sessionId = match[1]
+  const entry = sessionRegistry.get(sessionId)
+  if (!entry) return
+
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8')
+    const todos: Todo[] = JSON.parse(raw)
+    if (Array.isArray(todos)) entry.todos = todos
+  } catch { /* skip */ }
+}
+
+export function handleTasksChange(filePath: string): void {
+  const dirPath = path.dirname(filePath)
+  const sessionId = path.basename(dirPath)
+  const entry = sessionRegistry.get(sessionId)
+  if (!entry) return
+
+  entry.hasLock = fs.existsSync(path.join(dirPath, '.lock'))
+
+  let files: string[]
+  try { files = fs.readdirSync(dirPath) } catch { return }
+
+  const tasks: TaskEntry[] = []
+  for (const file of files) {
+    if (!/^\d+\.json$/.test(file)) continue
+    try {
+      const raw = fs.readFileSync(path.join(dirPath, file), 'utf8')
+      tasks.push(JSON.parse(raw) as TaskEntry)
+    } catch { /* skip */ }
+  }
+  entry.tasks = tasks
+}
+
+// ── Process detection (called on 5s interval) ─────────────────────────────
+
+export function updateProcessDetection(): void {
+  try {
+    const buf = execSync(
+      'wmic process where "name=\'node.exe\' or name=\'claude.exe\'" get ProcessId,ParentProcessId,CommandLine,CreationDate /FORMAT:LIST',
+      { timeout: 5000, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }
+    )
+    // Normalize line endings: WMI on some Windows versions outputs \r\r\n instead of \r\n
+    const raw = buf.toString('utf8').replace(/\0/g, '').replace(/\r\r/g, '\r')
+
+    // Reset all process alive flags before fresh detection
+    for (const entry of sessionRegistry.values()) {
+      entry.processAlive = false
+      entry.pid = undefined
+      entry.parentPid = undefined
+    }
+
+    const unmatchedProcs: { pid: number; parentPid: number; creationTime: number }[] = []
+
+    for (const record of raw.split(/\r?\n\r?\n/)) {
+      const fields = parseWmicRecord(record)
+      const cmdline = fields['CommandLine']
+      if (!cmdline || !isClaudeProcess(cmdline)) continue
+
+      const pid = parseInt(fields['ProcessId'], 10) || 0
+      const parentPid = parseInt(fields['ParentProcessId'], 10) || 0
+      const creationTime = parseWmiDate(fields['CreationDate'] || '') || 0
+
+      const resumeMatch = cmdline.match(/--resume\s+([0-9a-f-]{36})/)
+      const sessionMatch = cmdline.match(/--session-id\s+([0-9a-f-]{36})/)
+      const matchedId = resumeMatch?.[1] || sessionMatch?.[1]
+
+      if (matchedId) {
+        const entry = sessionRegistry.get(matchedId)
+        if (entry) {
+          entry.processAlive = true
+          entry.pid = pid
+          entry.parentPid = parentPid
+        }
+      } else if (pid && parentPid) {
+        unmatchedProcs.push({ pid, parentPid, creationTime })
+      }
+    }
+
+    // Link unmatched (-c flag) processes via mtime correlation
+    for (const proc of unmatchedProcs) {
+      if (!proc.creationTime) continue
+
+      let bestEntry: RegistryEntry | null = null
+      let bestDiff = Infinity
+
+      for (const entry of sessionRegistry.values()) {
+        if (entry.processAlive) continue
+        const mtime = entry.lastTranscriptMtime
+        if (!mtime) continue
+
+        // Transcript should be written within [processStart - 10s, processStart + 60s]
+        const diff = mtime - proc.creationTime
+        if (diff >= -10_000 && diff <= 60_000) {
+          if (Math.abs(diff) < bestDiff) {
+            bestDiff = Math.abs(diff)
+            bestEntry = entry
+          }
+        }
+      }
+
+      if (bestEntry) {
+        bestEntry.processAlive = true
+        bestEntry.pid = proc.pid
+        bestEntry.parentPid = proc.parentPid
+      }
+    }
+  } catch {
+    // wmic failed — leave processAlive flags unchanged
+  }
+}
+
+// ── Registry init ─────────────────────────────────────────────────────────
+
+export function initRegistry(): void {
+  if (registryInitialized) return
+  registryInitialized = true
+  handleHistoryChange()
+  scanAndRegisterTranscripts()
+  scanAndRegisterTodos()
+  scanAndRegisterTasks()
+  updateProcessDetection()
+}
+
+// ── Main export ───────────────────────────────────────────────────────────
+
+export function getSessions(): SessionInfo[] {
+  if (!registryInitialized) initRegistry()
+
   const now = Date.now()
   const sessions: SessionInfo[] = []
 
-  for (const [sessionId, histData] of historyMap) {
-    if (now - histData.lastActivity > MAX_AGE_MS) continue
-
-    // If we detected live processes, only show sessions that are actually running
-    // liveIds contains session IDs from --resume flags
-    // __no_resume__ marker means there are fresh sessions (no --resume) — allow recent sessions through
-    const isLive = liveIds.has(sessionId)
-    const hasFreshProcesses = liveIds.has('__no_resume__')
-    const isRecent = (now - histData.lastActivity) < WAITING_MAX_MS
-    if (hasAnyLive && !isLive && !(hasFreshProcesses && isRecent)) continue
-
-    const todos = todoMap.get(sessionId) || []
-    const tasksDir = readTasksDir(sessionId)
-    const transcriptMtime = getTranscriptMtime(sessionId, histData.projectPath)
-
-    const status = deriveStatus(transcriptMtime, histData.lastActivity, todos, tasksDir, sessionId, histData.projectPath)
-
-    const currentTask = getCurrentTask(todos, tasksDir, histData.lastUserMessage)
-    const currentAction = parseCurrentAction(sessionId, histData.projectPath)
-    const { completed: completedTodos, total: totalTodos } = getProgress(todos, tasksDir)
+  for (const entry of sessionRegistry.values()) {
+    const archived = !entry.processAlive && (now - entry.lastActivity > MAX_AGE_MS)
+    const status = deriveStatus(entry)
+    const { completed, total } = getProgress(entry.todos, entry.tasks)
 
     sessions.push({
-      sessionId,
-      projectName: getProjectName(histData.projectPath),
-      projectPath: histData.projectPath,
-      plantType: getPlantType(histData.projectPath),
-      lastActivityAt: histData.lastActivity,
-      transcriptMtimeMs: transcriptMtime,
+      sessionId: entry.sessionId,
+      projectName: getProjectName(entry.project),
+      projectPath: entry.project,
+      plantType: getPlantType(entry.project),
+      lastActivityAt: entry.lastActivity,
+      transcriptMtimeMs: entry.lastTranscriptMtime,
       status,
-      currentAction,
-      currentTask,
-      todos,
-      tasks: tasksDir?.tasks || [],
-      completedTodos,
-      totalTodos,
-      startedAt: histData.firstActivity,
-      hasLock: tasksDir?.hasLock || false,
+      currentAction: entry.currentAction,
+      currentTask: getCurrentTask(entry.todos, entry.tasks, entry.display),
+      todos: entry.todos,
+      tasks: entry.tasks,
+      completedTodos: completed,
+      totalTodos: total,
+      startedAt: entry.firstSeen,
+      hasLock: entry.hasLock,
+      processPid: entry.pid,
+      parentPid: entry.parentPid,
+      archived,
     })
   }
 
-  // Deduplicate by project path — keep only the most recent session per project
-  const byProject = new Map<string, SessionInfo>()
-  for (const s of sessions) {
-    const key = s.projectPath || s.sessionId
-    const existing = byProject.get(key)
-    if (!existing || s.lastActivityAt > existing.lastActivityAt) {
-      byProject.set(key, s)
-    }
-  }
-
-  return [...byProject.values()]
-    .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
-    .slice(0, MAX_SESSIONS)
+  return sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
 }

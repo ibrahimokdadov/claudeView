@@ -14,23 +14,24 @@ interface GardenViewProps {
 
 export function GardenView({ sessions, onOpenGreenhouse, onClose, onRefresh }: GardenViewProps): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const selected = sessions.find((s) => s.sessionId === selectedId) || null
+  const activeSessions = sessions.filter((s) => !s.archived && s.status !== 'idle')
+  const selected = activeSessions.find((s) => s.sessionId === selectedId) || null
 
   return (
     <div className="garden">
       <GardenHeader
-        count={sessions.length}
+        count={activeSessions.length}
         onExpand={onOpenGreenhouse}
         onRefresh={onRefresh}
         onClose={onClose}
       />
-      {sessions.length === 0 ? (
+      {activeSessions.length === 0 ? (
         <EmptyGarden />
       ) : (
         <>
           <div className="garden-shelf">
             <div className="garden-row">
-              {sessions.map((session) => (
+              {activeSessions.map((session) => (
                 <PlantPot
                   key={session.sessionId}
                   session={session}
@@ -38,6 +39,7 @@ export function GardenView({ sessions, onOpenGreenhouse, onClose, onRefresh }: G
                   onClick={() =>
                     setSelectedId((prev) => (prev === session.sessionId ? null : session.sessionId))
                   }
+                  onDoubleClick={() => window.claudeView.focusSession(session.sessionId)}
                 />
               ))}
             </div>
